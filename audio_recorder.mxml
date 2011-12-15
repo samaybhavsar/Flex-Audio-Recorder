@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mx:Application
+	xmlns:mx="http://www.adobe.com/2006/mxml"
+	layout="absolute"
+	width="318"
+	height="268"
+	creationComplete="init()">
+
+    <mx:Script>
+		<![CDATA[
+			import mx.controls.Alert;
+			import flash.net.NetStream;
+
+			private var myMic:Microphone;
+			private var nc:NetConnection;
+			private var ns:NetStream;
+			private var recordingState:String = "idle";
+			private var myDuration:Number = 0;
+			private var myServer:String = null;
+			private var mySoundFile:String = null;
+			private var myTimer:Timer = null;
+			private var playbackTimer:Timer = null;
+			private var timeLimit:Number = 0;
+
+			private function init():void {
+
+				// Not yet connected to the server. Disable the buttons.
+				record_btn.enabled = false;
+
+				//myServer = Application.application.parameters.myServer;
+				//mySoundFile = Application.application.parameters.mySound;
+				//timeLimit = Application.application.parameters.timeLimit;
+
+				myServer="rtmp://localhost/myapp";
+				mySoundFile=this.parameters.id1+"_"+this.parameters.id2;
+				timeLimit = 1800;
+
+				initMic("0xcccccc");
+
+				myTimer = new Timer(1000, timeLimit);
+				myTimer.addEventListener("timer", timerHandler);
+				timeText.text = createCounter(0);
+				record_btn.addEventListener(MouseEvent.CLICK, btnEventHandler);
+				setupNC();
+				addEventListener(Event.ENTER_FRAME, showMicLevel);
+
+				myMic = Microphone.getMicrophone();
+				myMic.setSilenceLevel(0);
+				myMic.rate = 22;
+				statusText.text = "connecting";
+			}
+
+			private function btnEventHandler(event:Event):void{
+				switch(record_btn.label)
+				{
+					case "Record Your Thought": record_btn.label="Stop Recording";
+								   record_start(event);
+								   break;
+					case "Stop Recording" : record_btn.label="Play Recording";
+								  record_stop(event);
+								  break;
+					case "Play Recording" : record_btn.label="replay";
+								  record_play(event);
+								  break;
+					case "Pause Recording" : record_btn.label="replay";
+								  record_play(event);
+								  break;
+					case "reply" : record_btn.label="replay";
+								  record_play(event);
+								  break;
+
+				}
+			}
+
+			private function setupNC():void{
+				nc = new NetConnection();
+				nc.addEventListener(NetStatusEvent.NET_STATUS, netStatus);
+				nc.connect(myServer);
+			}
+
+			private function netStatus(event:NetStatusEvent):void {
+				switch (event.info.code){
+					case "NetConnection.Connect.Success" :
+						setStatus("Connected");
+						ns = new NetStream(nc);
+						ns.attachAudio(myMic);
+						record_btn.enabled = true;
+						break;
+					case "NetStream.Record.Start" :
+						setStatus("recording...");
+						break;
+					case "NetStream.Record.Stop" :
+						setStatus("stopped recording");
+                        record_btn.label="Play Recording";
+						break;
+					case "NetStream.Buffer.Full" :
+						setStatus("playing");
+						break;
+					case "NetStream.Play.Start" :
+						setStatus ("buffering");
+						break;
+					case "NetStream.Seek.Notify" :
+						setStatus("Seeking");
+						break;
+					case "NetStream.Play.Reset" :
+						setStatus("pausing");
+						break;
+					case "NetStream.Play.Stop" :
+						//setStatus("stopping");
+						break;
+					case "NetStream.Buffer.Flush" :
+						//setStatus("flushing buffer");
+						break;
+					case "NetStream.Play.Complete" :
+						record_btn.label="Play Recording";
+						setStatus("Playback complete");
+						break;
+				}
+			}
+
+			private function record_start(event:Event):void{
+				initMic("0xff0000");
+				ns.close();
+				ns = new NetStream(nc);
+				ns.addEventListener(NetStatusEvent.NET_STATUS, netStatus);
+				ns.attachAudio(myMic);
+				ns.publish(mySoundFile, "record");
+				recordingState = "recording";
+				setPBstatus('recording');
+				myTimer.start();
+			}
+
+			private function record_stop(event:Event):void{
+				switch (recordingState) {
+					case "recording" :
+						ns.close();
+						myTimer.reset();
+						timeText.text = createCounter(0);
+						break;
+						setStatus("stopped");
+					case "playing" :
+						ns.play(false);
+						ns.close();
+						playProgress.visible = false;
+						micLevel.visible = true;
+						ns = new NetStream(nc);
+						ns.attachAudio(myMic);
+						break;
+				}
+				recordingState = "idle";
+				setPBstatus('ready');
+				initMic("0xcccccc");
+				ExternalInterface.call("stopAudioRecord",this.parameters.id1+"_"+this.parameters.id2);
+			}
+
+			private function record_play(event:Event):void{
+				switch(recordingState){
+				case "idle" :
+					record_btn.styleName = "pauseStyle";
+					record_btn.label = "Pause Recording";
+					playSound();
+					break;
+
+				case "playing" :
+					recordingState = "paused";
+					record_btn.styleName = "playStyle";
+					record_btn.label = "Play Recording";
+					ns.togglePause();
+					break;
+
+				case "paused" :
+					record_btn.label = "Pause Recording";
+					record_btn.styleName = "pauseStyle";
+					recordingState = "playing";
+					ns.togglePause();
+					break;
+				}
+
+			}
+
+		private function playSound():void{
+			playProgress.visible = true;
+			micLevel.visible = false;
+
+			recordingState = "playing";
+			ns.close();
+			setStatus("buffering");
+			var myClient:Object = new Object();
+			ns = new NetStream(nc);
+			ns.addEventListener(NetStatusEvent.NET_STATUS, netStatus);
+			ns.bufferTime = 5;
+			ns.client = myClient;
+			myClient.onMetaData = function(myMeta:Object):void{
+			myDuration = myMeta["duration"];
+
+			playbackTimer = new Timer(1000, myDuration);
+			playbackTimer.addEventListener("timer", playbackTimerHandler);
+			timeText.text = createTime(0);
+			playbackTimer.start();
+
+			}
+			myClient.onPlayStatus = function(myPBstatus:Object):void{
+				if(myPBstatus["code"] == "NetStream.Play.Complete"){
+					setStatus("Playback complete");
+					record_btn.label="Play Recording";
+					recordingState = "idle";
+					ns = new NetStream(nc);
+					ns.attachAudio(myMic);
+					playProgress.value = 0;
+					playProgress.visible = false;
+					micLevel.visible = true;
+				}
+				recordingState = "idle";
+			}
+			ns.play(mySoundFile);
+		}
+
+        public function playbackTimerHandler(event:TimerEvent):void {
+        	timeText.text = createTime(ns.time);
+        	playProgress.value = (ns.time / myDuration) * 10;
+        	//timeText.text = ns.time.toString();
+   	    }
+
+		private function scanPosition():void {
+			ns.play(false);
+			//divide by 10 because the Slider values go from 0 - 10 and we want a value
+			//between 0 - 1.0
+			ns.play(mySoundFile);
+			ns.seek (playProgress.value/10 * myDuration);
+		}
+
+			private function showMicLevel(event:Event):void{
+				switch (recordingState){
+					case "recording" :
+						micLevel.setProgress(myMic.activityLevel, 100);
+						break;
+					case "idle" :
+						micLevel.setProgress(myMic.activityLevel, 100);
+						break;
+					case "playing" :
+						micLevel.setProgress(ns.time, myDuration);
+						timeText.text = createCounter(ns.time);
+						break;
+				}
+			}
+
+			private function setPBstatus(msg:String):void{
+				micLevel.label = msg;
+			}
+
+			private function initMic(myColor:String):void{
+				micLevel.setStyle("barColor", myColor);
+			}
+
+			private function createCountdown(time:int):String{
+
+				time = timeLimit - time;
+				var myBuffer:String = "0";
+
+				var currentMins:int = Math.floor(time/60);
+				var currentSecs:int = (time - (currentMins*60));
+				var mySecs:String = ((currentMins < 10) ? myBuffer + currentMins.toString(): currentMins.toString())
+				+ ":"
+				+ ((currentSecs < 10) ? myBuffer + currentSecs.toString(): currentSecs.toString());
+
+				return mySecs;
+			}
+
+			private function createCounter(time:int):String{
+
+				var myBuffer:String = "0";
+
+				var currentMins:int = Math.floor(time/60);
+				var currentSecs:int = (time - (currentMins*60));
+				var mySecs:String = ((currentMins < 10) ? myBuffer + currentMins.toString(): currentMins.toString())
+				+ ":"
+				+ ((currentSecs < 10) ? myBuffer + currentSecs.toString(): currentSecs.toString());
+
+				return mySecs;
+			}
+
+		private function createTime(time:int):String{
+			//time = timeLimit - time;
+			var myBuffer:String = "0";
+			var currentMins:int = Math.floor(time/60);
+			var currentSecs:int = (time - (currentMins*60));
+			var mySecs:String = ((currentMins < 10) ? myBuffer + currentMins.toString(): currentMins.toString())
+			+ ":"
+			+ ((currentSecs < 10) ? myBuffer + currentSecs.toString(): currentSecs.toString());
+
+			return mySecs;
+		}
+
+        public function timerHandler(event:TimerEvent):void {
+        	if(myTimer.currentCount < timeLimit){
+	    	        timeText.text = createCounter(myTimer.currentCount);
+	        	} else {
+	        		myTimer.reset();
+	        		record_stop(null);
+	        	}
+	   	    }
+
+		private function setStatus(msg:String):void{
+			statusText.text = msg;
+		}
+
+		]]>
+	</mx:Script>
+    <mx:Image id="loader1" source="@Embed(source='mic.png')" x="140" y="45"/>
+
+
+	<mx:ProgressBar x="0" y="161" mode="manual" id="micLevel" label="" labelPlacement="bottom" width="318" fontSize="10" fontWeight="normal"/>
+	<mx:HSlider change="scanPosition()" id="playProgress" showTrackHighlight="true" width="318" x="0" y="161" visible="false"/>
+	<mx:Text id="timeText" text="00:00" width="318" height="18" y="187" x="0" textAlign="center"/>
+	<mx:Text id="statusText" text="" width="316" height="18" y="205" x="2" textAlign="center"/>
+	<mx:ControlBar x="0" y="223" width="318" height="45" horizontalAlign="center">
+		<mx:Button
+			label="Record Your Thought"
+			id="record_btn"
+			width="316"
+			color="#000000"
+		/>
+	</mx:ControlBar>
+</mx:Application>
